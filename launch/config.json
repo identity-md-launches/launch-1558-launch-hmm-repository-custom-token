@@ -1,0 +1,12 @@
+{
+  "chainId": 1,
+  "deployer": "0xF2FE54d361E07B8508829dcADAde8C438c4cdDd7",
+  "forwarder": "0x876C2FB3eAa91D32Ef03186853bB82433b949a71",
+  "dev": "0x39C593c1bC4d91E42d797456077586f6058eBf67",
+  "steward": "0x0000000000000000000000000000000000000000",
+  "launcher": "0x39C593c1bC4d91E42d797456077586f6058eBf67",
+  "poolBps": 2500,
+  "initialMarketCapWei": "10000000000000000000000",
+  "repoUrl": "https://github.com/deep-pond-dev/hmm",
+  "baseCommit": "f7bbf55f28d95c525ce6be0d4214d9aaa319f1ab"
+}

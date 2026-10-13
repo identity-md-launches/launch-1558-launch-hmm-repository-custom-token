@@ -1,0 +1,12 @@
+{
+  "name": "hmm-devnet",
+  "private": true,
+  "type": "module",
+  "description": "Local mainnet fork with hmm launched through the real IMD factory, and a simulated swarm that answers questions.",
+  "scripts": {
+    "swarm": "node swarm.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  }
+}

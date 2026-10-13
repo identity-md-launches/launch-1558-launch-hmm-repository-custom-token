@@ -1,0 +1,11 @@
+{
+  "name": "hmm-launch",
+  "private": true,
+  "type": "module",
+  "description": "Builds, checks and pays for the hmm launch request on the IMD swarm.",
+  "dependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "viem": "^2.21.0"
+  }
+}

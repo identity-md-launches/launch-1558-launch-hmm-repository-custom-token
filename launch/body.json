@@ -1,0 +1,36 @@
+{
+  "objective": "Launch hmm from this repository as it is: a custom_token launch on Ethereum mainnet, paired with IMD.\n\nToken: contract HmmToken (src/HmmToken.sol), name \"hmm\", symbol HMM, 18 decimals, constructorArgs [], totalSupply 1000000000000000000000000000 (1,000,000,000 HMM minted once to msg.sender, the factory). No owner, no mint or burn after construction, no fee or rule on transfer.\n\nApplication contracts, in this order:\n1. SwarmOracleAdapter (src/SwarmOracleAdapter.sol), constructorArgs [\"0xa43e6f75ee006411f79ac1c84120606c2330de82\", \"0x5598aa9146215bc13eb26f2c692ad1461fd32982\", \"5\", \"4\"]\n2. HmmMine (src/HmmMine.sol), constructorArgs [\"$token\", \"0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7\", \"0xa43e6f75ee006411f79ac1c84120606c2330de82\", \"0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000\", \"0x876c2fb3eaa91d32ef03186853bb82433b949a71\", \"$contract:SwarmOracleAdapter\", \"0x39c593c1bc4d91e42d797456077586f6058ebf67\", \"500\", \"600\", \"15552000\", \"0\"]\n\nSwarmOracleAdapter takes no mine argument: HmmMine's constructor calls bind() on the SwarmOracleAdapter deployed just before it (an earlier contract of this launch, in the same transaction), which claims it; it moves no tokens. No constructor argument is the zero address. The fourth HmmMine argument is bytes32(\"oracle.request@oracle-1\").\n\nEconomics, copied into launch.json exactly: poolBps 2500, initialMarketCapWei 10000000000000000000000 (10,000 IMD), remainderTo 0x876c2fb3eaa91d32ef03186853bb82433b949a71.\n\nThe remainder goes to the GenesisForwarder at 0x876c2fb3eaa91d32ef03186853bb82433b949a71, deployed earlier from src/GenesisForwarder.sol with registry 0x7c9d5ee697bff5ac4f10e2e54d3f40c44e48fe23 and mineName bytes32(\"HmmMine\"). After launch, anyone calls forward(launchNumber): it reads this launch from the registry, checks the HmmMine artifact mines this token and names this forwarder, moves the whole remainder into it and starts mining.\n\nWhat it does: HMM is mined by asking the IMD swarm. Anyone proposes a question in HmmMine (the mine writes the oracle.request JSON itself from validated fields) and backs it with IMD; once it holds the Intake price it is asked through the IMD Intake (requestWithFailure) with SwarmOracleAdapter as the callback target. Answers signed by the IMD oracle signer for the adapter (panel >= 5, quorum >= 4, agreed >= quorum and a majority) credit the current 10-minute round; backers share the round's emission pro-rata to IMD paid. Emission halves every 180 days and never exceeds the reserve; 5% of each round goes to the dev address. HmmMine has no steward: it takes no steward argument and its steward stays zero forever, so nobody can change the adapter, the action id or any rule after launch; there are no owner powers at all.\n\nKeep contract logic, names, constructor arguments, fee rules and permissions exactly as they are; adapt the Foundry project only as much as the launch factory requires. The test suite (forge test) must stay green.",
+  "repoUrl": "https://github.com/deep-pond-dev/hmm",
+  "baseCommit": "f7bbf55f28d95c525ce6be0d4214d9aaa319f1ab",
+  "shape": "chain",
+  "references": [
+    "custom-token-launch",
+    "solidity-security-review"
+  ],
+  "steps": [
+    {
+      "skill": "audit-imported-code"
+    },
+    {
+      "skill": "adapt-contract-project"
+    },
+    {
+      "skill": "write-foundry-tests",
+      "paths": [
+        "test"
+      ]
+    },
+    {
+      "skill": "adversarial-review"
+    }
+  ],
+  "onchain": "custom_token",
+  "chainId": 1,
+  "pairWith": "imd",
+  "economics": {
+    "poolBps": 2500,
+    "initialMarketCapWei": "10000000000000000000000",
+    "remainderTo": "0x876c2fb3eaa91d32ef03186853bb82433b949a71"
+  },
+  "github": true
+}
