@@ -1,0 +1,50 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "HmmToken",
+    "name": "hmm",
+    "symbol": "HMM",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [
+    {
+      "contract": "SwarmOracleAdapter",
+      "constructorArgs": [
+        "0xa43e6f75ee006411f79ac1c84120606c2330de82",
+        "0x5598aa9146215bc13eb26f2c692ad1461fd32982",
+        "5",
+        "4"
+      ]
+    },
+    {
+      "contract": "HmmMine",
+      "constructorArgs": [
+        "$token",
+        "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+        "0xa43e6f75ee006411f79ac1c84120606c2330de82",
+        "0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000",
+        "0x876c2fb3eaa91d32ef03186853bb82433b949a71",
+        "$contract:SwarmOracleAdapter",
+        "0x39c593c1bc4d91e42d797456077586f6058ebf67",
+        "500",
+        "600",
+        "15552000",
+        "0"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "economics": {
+    "poolBps": 2500,
+    "initialMarketCapWei": "10000000000000000000000",
+    "remainderTo": "0x876c2fb3eaa91d32ef03186853bb82433b949a71"
+  },
+  "notes": "Ethereum mainnet HMM/IMD launch. HmmToken mints 1,000,000,000 HMM (18 decimals) once to msg.sender, the factory; it has no owner, subsequent mint or burn, transfer fee or transfer restriction. Deploy SwarmOracleAdapter before HmmMine atomically in the same launch transaction: the mine constructor calls bind(), moving no tokens. HmmMine has no steward argument; steward remains zero and nobody can change its adapter, action or rules. The action word is bytes32(oracle.request@oracle-1). The existing GenesisForwarder at economics.remainderTo is not deployed again; its registry is 0x7c9d5ee697bff5ac4f10e2e54d3f40c44e48fe23 and mineName is bytes32(HmmMine). After launch, anyone calls forward(launchNumber); it checks the registered token and mine, transfers its whole HMM balance to the mine and calls start(). The first start fixes the reserve and genesis with no delay. The pool allocation is 25% and the remainder allocation is 65%. The opening market cap is 10,000 IMD; pool.initialPrice is provenance only and the deployer derives the opening price from economics and supply. Anyone proposes validated questions, optionally with bounded definitions, and backs them with IMD. HmmMine builds the JSON and pays the live Intake price through requestWithFailure, naming the adapter as callback target. Only valid, unexpired, unused oracle-signed answers for the adapter with panel >= 5, quorum >= 4, agreed >= quorum and a majority credit the current 600-second round. Backers share rewards by actual IMD paid; 5% accrues to the fixed dev address. Emission halves every 15,552,000 seconds and stays within the initial reserve. Imported audit recheck against the accepted source and regression tests: 5ff239b68c552b3ec39233fac9f3720b1a220ae3646bb225e953187814bff963 no longer reproduces: live-price payment retains refundable pro-rata surplus without removing reward rights. c002d6afba29414683d1cec92ee53b984f76a6e2d2f35922c62394a6e70f3495 no longer reproduces for pooled backing: completion requires a direct caller with empty code, rejecting delegated EOAs; solo backers can still lose their own payment through batching. 25d530230732c076d4627e469543839fab178d4da3940270519aadeb558abefc missing definitions no longer reproduces: proposeWithDefinitions/bodyWithDefinitions exist; allowAmbiguous is absent and a wording refusal still spends the paid price without rewards or a refund of that price. a41532a877c5d0c9e426824d8d0617109357dbe3de9dc9e4e36948bd9b710d63 the forwarding revert no longer reproduces: repeated authorized start() is a no-op; late HMM can reach the mine but remains outside its reserve and is unrecoverable. a07ab78e0ae39c6eaee1df641998c9d5df45eebcce03a7c11b1dc5db8feee0fd remains true for a separately deployed adapter: bind() is first-caller-wins; atomic ordered deployment prevents interleaving here. ebc7af44b22b331e63397568301893402f63e335455b30575a577ce3f2cd6813 no longer reproduces: anyone may expire an Asked question strictly after its seven-day answer deadline; this moves no funds and blocks later credit. ea7d6f9ab0614b714675cc2b0f52427efd3509268c0dc3cc29a1023bb36a8b56 no longer reproduces: the last round claimant receives remaining reward dust, including after zero-rounded claims. 2cfc2f7d7d57220bbcab9f71b12773a2cb0f3173835bb772c9c4ebb4960c44eb is a scope report, not a defect; this manifest review checks local source, constructor ABIs and offline tests, and does not repeat its live-mainnet or off-chain claims. Only the manifest is changed; accepted contract logic is preserved. Local checks: Slither flags OpenZeppelin Math.mulDiv's intentional XOR inverse seed as High (incorrect-exp). Medium notices concern modular/era arithmetic, zero sentinels/default-initialized locals, unused return fields, and reentrancy: _ask entry points are guarded and config is unreachable with zero steward. Accepted sources are outside this manifest-only scope. forge fmt --check reports pre-existing formatting differences in two test files."
+}
