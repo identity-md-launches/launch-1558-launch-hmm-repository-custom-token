@@ -25,6 +25,10 @@ Each round's emission goes to the questions answered in it, split by the IMD the
 answer emits nothing; its emission rolls into the next round that gets one. So the pot grows while nobody mines, and
 mining is never wasted: if questions are scarce, each one is worth more.
 
+If the Intake price drops during funding, the mine spends the new price and keeps the difference for pro-rata
+refunds to backers. That question contributes only the price actually paid to its round. The final backer claiming
+a round takes its remaining division dust; the final surplus refund likewise takes any IMD rounding remainder.
+
 **Dev share:** 5% of every round (`devBps` 500, hard cap 10%), payable to the dev wallet by anyone (`payDev`).
 Rounded up per round and down in total, so the backers' rewards plus the dev share never exceed what was emitted.
 

@@ -22,14 +22,22 @@ contract GenesisForwarderTest is HmmTestBase {
         assertTrue(m.started());
     }
 
-    function test_forward_onlyOncePerMine() public {
+    // The deployed forwarder always calls start(); the mine makes later calls harmless.
+    function test_forward_lateTokensMoveWithoutRestartingTheMine() public {
         vm.expectRevert(abi.encodeWithSelector(GenesisForwarder.NothingHeld.selector, address(hmm)));
         forwarder.forward(LAUNCH);
         // even if more of the token arrives later, the mine will not restart
         vm.prank(makeAddr("pool"));
         hmm.transfer(address(forwarder), 1 ether);
-        vm.expectRevert(HmmMine.AlreadyStarted.selector);
-        forwarder.forward(LAUNCH);
+        uint256 g = mine.genesis();
+        uint256 rate = mine.baseRate();
+        vm.warp(block.timestamp + 1 days);
+        assertEq(forwarder.forward(LAUNCH), 1 ether);
+        assertEq(hmm.balanceOf(address(forwarder)), 0);
+        assertEq(hmm.balanceOf(address(mine)), RESERVE + 1 ether);
+        assertEq(mine.genesis(), g);
+        assertEq(mine.reserve(), RESERVE);
+        assertEq(mine.baseRate(), rate);
     }
 
     function test_forward_refusesOtherLaunchKinds() public {

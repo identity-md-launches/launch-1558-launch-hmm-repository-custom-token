@@ -79,7 +79,7 @@ contract EmissionTest is HmmTestBase {
         assertEq(hmm.balanceOf(address(mine)), RESERVE - a - b - mine.devPaid());
     }
 
-    /// @dev Many backers of one question: their claims never exceed the round, and lose at most a wei each.
+    /// @dev Many backers of one question: the final claim includes dust, so all claims sum to the round's reward.
     function testFuzz_pooledClaims_neverExceedTheRound(uint96[5] memory parts) public {
         bytes memory body = _body("pooled");
         address[5] memory who;
@@ -113,7 +113,6 @@ contract EmissionTest is HmmTestBase {
             vm.prank(who[i], who[i]);
             total += mine.claim(_ids(id));
         }
-        assertLe(total, reward);
-        assertGe(total + 5, reward);
+        assertEq(total, reward);
     }
 }

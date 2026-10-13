@@ -51,7 +51,10 @@ contract LaunchForkTest is Test {
 
     function setUp() public {
         vm.createSelectFork(vm.envOr("MAINNET_RPC_URL", string("http://127.0.0.1:8545")));
-        forwarder = new GenesisForwarder(HmmLaunch.LAUNCH_REGISTRY, HmmLaunch.MINE_NAME);
+        // This launch uses the forwarder already deployed on mainnet, including its unconditional start() call.
+        forwarder = GenesisForwarder(0x876C2FB3eAa91D32Ef03186853bB82433b949a71);
+        assertEq(address(forwarder.registry()), HmmLaunch.LAUNCH_REGISTRY);
+        assertEq(forwarder.mineName(), HmmLaunch.MINE_NAME);
         // The real oracle key cannot sign here, so the rehearsal's adapter trusts a test key; everything else is real.
         roles = HmmLaunch.Roles({
             forwarder: address(forwarder),
@@ -178,7 +181,7 @@ contract LaunchForkTest is Test {
         vm.prank(friend, friend);
         uint256 friendGot = mine.claim(_ids(id));
         assertEq(minerGot, uint256(reward) * 3 / 5);
-        assertEq(friendGot, uint256(reward) * 2 / 5);
+        assertEq(friendGot, uint256(reward) - minerGot, "last claimant receives rounding dust");
         assertEq(hmm.balanceOf(miner), minerGot);
 
         assertGt(mine.devOwed(), 0);
@@ -217,6 +220,31 @@ contract LaunchForkTest is Test {
         FACTORY.setRequester(N, vault);
         (,,, address req) = FACTORY.positionOf(N);
         assertEq(req, vault);
+    }
+
+    function test_fixedForwarderMatchesSourceAndForwardsLateHMMWithoutRestarting() public {
+        GenesisForwarder compiled = new GenesisForwarder(HmmLaunch.LAUNCH_REGISTRY, HmmLaunch.MINE_NAME);
+        assertEq(address(forwarder).code, address(compiled).code, "the fixed deployed forwarder matches the source");
+        forwarder.forward(N);
+        uint256 id = _askPooled();
+        _answerThroughTheRealIntake(id);
+        _claimAndCheck(id);
+        uint256 reserve = mine.reserve();
+        uint256 genesis = mine.genesis();
+        uint256 rate = mine.baseRate();
+        uint256 assigned = mine.assigned();
+        uint256 claimed = mine.claimedTotal();
+        uint256 balance = hmm.balanceOf(address(mine));
+        vm.prank(miner);
+        hmm.transfer(address(forwarder), 1 ether);
+        assertEq(forwarder.forward(N), 1 ether);
+        assertEq(hmm.balanceOf(address(forwarder)), 0);
+        assertEq(hmm.balanceOf(address(mine)), balance + 1 ether);
+        assertEq(mine.reserve(), reserve);
+        assertEq(mine.genesis(), genesis);
+        assertEq(mine.baseRate(), rate);
+        assertEq(mine.assigned(), assigned);
+        assertEq(mine.claimedTotal(), claimed);
     }
 
     /* helpers */

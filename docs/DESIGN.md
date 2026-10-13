@@ -34,19 +34,38 @@ in circulation outside the pool and the swarm's share stands for a question the 
 1. `propose(spec, amount)`: the mine writes the IMD oracle JSON from the `Spec` (question text, answer type, evidence,
    chain, window, panel and quorum) and checks every field, so nobody can add fields that would make the answer not
    count. `bodyOf(spec)` shows the exact bytes. The target is the Intake price at that moment. The proposer backs it
-   with `amount` (≥ 0.01 IMD).
+   with `amount` (≥ 0.01 IMD, or the whole price if it is lower). Optional meanings can be supplied through
+   `proposeWithDefinitions(spec, definitions, amount)`; `bodyWithDefinitions(spec, definitions)` shows its exact
+   bytes. Each definition is a `(key, value)` pair: at most 16 unique nonempty keys of at most 64 bytes and nonempty
+   values of at most 512 bytes, using the question's printable-ASCII rules. The wording screen stays enabled.
 2. `back(id, amount, body)`: anyone adds IMD within 3 days. The backer who completes the price passes the body (from
    the `Proposed` event) and the question is asked in that transaction; when other backers' IMD is in it, that backer
-   must be an account calling directly, so no other Intake request can come first in the transaction. If the price rose meanwhile, completion
-   reverts, and backers take their IMD back after the window with `refund(id)`.
+   must be an account calling directly with no delegated code, so no other Intake request can come first in the
+   transaction. If the price rose meanwhile, completion reverts, and backers take their IMD back after the window
+   with `refund(id)`. If it fell, only the live price is spent, and `refund(id)` immediately returns each backer's
+   pro-rata unspent surplus. After asking, `question.target` is the actual payment and `question.raised` is the
+   frozen original backing; the latter remains the denominator of the backers' split.
 3. The swarm answers: status 0 credits the current round (backers' shares = IMD paid). Status 1 (refused) or 2 (no
-   agreement) marks it failed; that IMD is spent, as it would be by any oracle user.
-4. `claim(ids)` after the round ends.
+   agreement) marks it failed; that IMD is spent, as it would be by any oracle user. If no callback arrives, anyone
+   can call `expire(id)` strictly after `answerDeadline(id)`, seven days after the ask. Until that call a late answer
+   may still count; afterwards the question is terminal. Expiry moves no funds.
+4. `claim(ids)` after the round ends. Claims automatically return any unclaimed price-drop surplus before consuming
+   the backing. A separate surplus refund does not consume HMM reward rights.
 
 ## Rounds and emission
 `credit` puts the question into round `(now − genesis) / 600`. The first credit of a round fixes its emission:
 `emittedAt(roundEnd) − assigned`, i.e. everything emitted since the last answered round ended. Later credits in the
 same round only add shares. `assigned` only grows and is bounded by the schedule, which is bounded by the reserve.
+
+Before rounding, a backer's reward is `round.reward * question.target * backing / (round.shares * question.raised)`.
+The final claimant in a round receives the residual integer-division dust. Zero-rounded claims are recorded too,
+so they cannot prevent that final claim. The corresponding last-surplus-refund rule returns every unspent IMD wei.
+The dev share calculation is unchanged.
+
+For event consumers, `PriceAdjusted(id, quoted, paid)` precedes `Asked` when the price falls. `Refunded` still means
+an expired Open backing was withdrawn; `SurplusRefunded` means an unspent price difference was returned without
+reducing reward backing. Read `refundable(id, backer)` and `claimable(id, backer)` for current entitlement, including
+any final-claim dust. `claimedBacking`, `roundClaims` and `surplusRefunds` expose the settlement progress.
 
 ## Trust and failure modes
 - **IMD:** the Intake (immutable address), its writer (completes requests) and the oracle signer. A malicious writer

@@ -47,10 +47,15 @@ contract HmmMineTest is HmmTestBase {
         mine.start();
     }
 
-    function test_start_onlyOnce() public {
+    function test_start_repeatedForwarderCallDoesNotRestart() public {
+        uint256 g = mine.genesis();
+        uint256 rate = mine.baseRate();
+        vm.warp(block.timestamp + 1 days);
         vm.prank(address(forwarder));
-        vm.expectRevert(HmmMine.AlreadyStarted.selector);
         mine.start();
+        assertEq(mine.genesis(), g);
+        assertEq(mine.reserve(), RESERVE);
+        assertEq(mine.baseRate(), rate);
     }
 
     function test_start_needsReserve() public {
@@ -416,7 +421,8 @@ contract HmmMineTest is HmmTestBase {
         assertEq(imd.balanceOf(alice), 1_000 ether);
     }
 
-    function test_priceFall_paysTheQuotedTarget() public {
+    // Imported audit: paying the stale quote loses the price difference to the Intake.
+    function test_priceFall_paysTheLivePriceAndKeepsTheSurplus() public {
         bytes memory body = _body("q");
         vm.prank(alice, alice);
         uint256 id = mine.propose(_spec("q"), 0.3 ether);
@@ -425,7 +431,10 @@ contract HmmMineTest is HmmTestBase {
         vm.prank(bob, bob);
         mine.back(id, 0.2 ether, body);
         assertEq(uint8(_status(id)), uint8(HmmMine.Status.Asked));
-        assertEq(imd.balanceOf(payTo), PRICE);
+        assertEq(imd.balanceOf(payTo), 0.4 ether);
+        assertEq(imd.balanceOf(address(mine)), 0.1 ether);
+        assertEq(mine.refundableSurplus(), 0.1 ether);
+        assertEq(mine.question(id).target, 0.4 ether);
     }
 
     function test_oneAskPerTransaction() public {

@@ -53,14 +53,20 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         uint16 toleranceBps; // uint256 answers only: how far answers may differ and still agree
     }
 
+    /// @notice Optional meanings that pin the reading of a question for the swarm's wording screen.
+    struct Definition {
+        string key;
+        string value;
+    }
+
     /// @dev Four slots; what an answer updates (adapter, round, status) shares one.
     struct Question {
         bytes32 bodyHash;
         address proposer;
         uint64 deadline;
         uint32 version; // the config (adapter, action) it was proposed under
-        uint128 target;
-        uint128 raised;
+        uint128 target; // funding target while Open; actual Intake payment once Asked
+        uint128 raised; // total backing, frozen once Asked (including any refundable surplus)
         bytes32 requestId;
         address adapter;
         uint32 round;
@@ -70,6 +76,16 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     struct Round {
         uint128 shares; // IMD paid by the questions answered in the round
         uint128 reward; // HMM for the round's backers, after the dev share
+    }
+
+    struct SurplusRefund {
+        uint128 backing; // original backing whose surplus has been claimed
+        uint128 refunded; // IMD returned
+    }
+
+    struct RoundClaims {
+        uint128 shares; // paid shares of fully claimed questions
+        uint128 claimed; // HMM paid to the round's backers
     }
 
     /// @notice A snapshot for front ends.
@@ -99,6 +115,10 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     uint256 public constant MAX_WINDOW_HOURS = 720;
     uint256 public constant MIN_BACKING = 0.01 ether; // 0.01 IMD, unless less is left to raise
     uint256 public constant FUNDING_WINDOW = 3 days;
+    uint256 public constant ANSWER_WINDOW = 7 days;
+    uint256 public constant MAX_DEFINITIONS = 16;
+    uint256 public constant MAX_DEFINITION_KEY_BYTES = 64;
+    uint256 public constant MAX_DEFINITION_VALUE_BYTES = 512;
     uint256 public constant CONFIG_DELAY = 3 days;
     uint256 public constant MAX_DEV_BPS = 1000;
     uint256 internal constant MAX_ERAS = 64;
@@ -134,21 +154,30 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     uint256 public devPaid;
     /// @notice IMD held for questions still raising.
     uint256 public openRaised;
+    /// @notice IMD saved by Intake price falls, still owed to the affected questions' backers.
+    uint256 public refundableSurplus;
     uint256 public questionCount;
 
     mapping(uint256 id => Question) internal _questions;
     mapping(bytes32 requestId => uint256 id) public questionOf;
     mapping(uint256 id => mapping(address backer => uint256 amount)) public backing;
     mapping(uint256 round => Round) public rounds;
+    mapping(uint256 id => uint256 deadline) public answerDeadline;
+    mapping(uint256 id => SurplusRefund) public surplusRefunds;
+    mapping(uint256 id => mapping(address backer => bool)) public surplusRefunded;
+    mapping(uint256 id => uint128 amount) public claimedBacking;
+    mapping(uint256 round => RoundClaims) public roundClaims;
 
     event Started(uint256 reserve, uint256 genesis, uint256 baseRate);
     event Proposed(uint256 indexed id, address indexed proposer, uint256 target, uint256 deadline, bytes body);
     event Backed(uint256 indexed id, address indexed backer, uint256 amount, uint256 raised);
     event Asked(uint256 indexed id, bytes32 indexed requestId, address adapter);
+    event PriceAdjusted(uint256 indexed id, uint256 quoted, uint256 paid);
     event RoundOpened(uint256 indexed round, uint256 emitted, uint256 devShare);
     event Answered(uint256 indexed id, bytes32 indexed requestId, uint256 indexed round, uint256 shares);
     event Failed(uint256 indexed id, bytes32 indexed requestId, uint8 status, bytes32 reason);
     event Refunded(uint256 indexed id, address indexed backer, uint256 amount);
+    event SurplusRefunded(uint256 indexed id, address indexed backer, uint256 amount);
     event Claimed(uint256 indexed id, address indexed backer, uint256 amount);
     event DevPaid(address indexed dev, uint256 amount);
     event ConfigQueued(address adapter, bytes32 action, uint256 eta);
@@ -166,6 +195,7 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     error NotLive();
     error BadQuestion();
     error BadSpec();
+    error BadDefinitions();
     error NotSold();
     error TooSmall();
     error NotOpen();
@@ -251,10 +281,11 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IHmmMine
-    /// @dev Whatever HMM the mine holds now is the reserve; HMM sent here later is never emitted.
+    /// @dev Whatever HMM the mine holds on the first call is the reserve; HMM sent here later is never emitted.
+    /// Later calls from the fixed forwarder are no-ops, so its unconditional start() cannot strand late transfers.
     function start() external {
         if (msg.sender != forwarder) revert NotForwarder();
-        if (genesis != 0) revert AlreadyStarted();
+        if (genesis != 0) return;
         uint256 balance = hmm.balanceOf(address(this));
         if (balance == 0) revert NothingToMine();
         uint256 rate = balance / (2 * eraLength);
@@ -272,7 +303,20 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     /// @return id The question id.
     function propose(Spec calldata spec, uint256 amount) external nonReentrant returns (uint256 id) {
         _requireLive();
-        bytes memory body = bodyOf(spec);
+        return _propose(bodyOf(spec), amount);
+    }
+
+    /// @notice Proposes with bounded definitions, keeping the original Spec and propose ABI available.
+    function proposeWithDefinitions(Spec calldata spec, Definition[] calldata definitions, uint256 amount)
+        external
+        nonReentrant
+        returns (uint256 id)
+    {
+        _requireLive();
+        return _propose(bodyWithDefinitions(spec, definitions), amount);
+    }
+
+    function _propose(bytes memory body, uint256 amount) internal returns (uint256 id) {
         uint256 price = intake.priceOf(action, address(imd));
         if (price == 0) revert NotSold();
         if (amount > price) amount = price;
@@ -305,33 +349,60 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         _back(id, q, amount, body);
     }
 
-    /// @notice Returns the caller's IMD from a question that did not raise its price before its deadline.
+    /// @notice Returns expired Open backing, or the caller's unspent surplus after an Intake price fall.
+    /// Refunding surplus leaves the caller's HMM reward rights intact, even while the question is pending.
     function refund(uint256 id) external nonReentrant {
         Question storage q = _questions[id];
-        if (q.status != Status.Open || block.timestamp <= q.deadline) revert NotRefundable();
-        uint256 amount = backing[id][msg.sender];
-        if (amount == 0) revert NothingToRefund();
-        backing[id][msg.sender] = 0;
-        q.raised -= uint128(amount);
-        openRaised -= amount;
-        imd.safeTransfer(msg.sender, amount);
-        emit Refunded(id, msg.sender, amount);
+        uint256 amount;
+        if (q.status == Status.Open) {
+            if (block.timestamp <= q.deadline) revert NotRefundable();
+            amount = backing[id][msg.sender];
+            if (amount == 0) revert NothingToRefund();
+            backing[id][msg.sender] = 0;
+            q.raised -= uint128(amount);
+            openRaised -= amount;
+            emit Refunded(id, msg.sender, amount);
+        } else {
+            if (q.raised <= q.target) revert NotRefundable();
+            if (backing[id][msg.sender] == 0 || surplusRefunded[id][msg.sender]) revert NothingToRefund();
+            amount = _takeSurplus(id, q, msg.sender);
+        }
+        if (amount != 0) imd.safeTransfer(msg.sender, amount);
+    }
+
+    /// @notice Closes an unanswered request after seven days. The Intake payment is already spent; no value moves.
+    /// A late callback may still settle until this is called, but cannot revive a question closed here.
+    function expire(uint256 id) external nonReentrant {
+        Question storage q = _questions[id];
+        if (q.status != Status.Asked) revert NotAsked();
+        uint256 deadline = answerDeadline[id];
+        if (block.timestamp <= deadline) revert TooEarly(deadline + 1);
+        q.status = Status.Failed;
+        emit Failed(id, q.requestId, 2, "timeout");
     }
 
     /// @notice Claims the caller's HMM from answered questions whose round has ended.
     function claim(uint256[] calldata ids) external nonReentrant returns (uint256 total) {
+        uint256 refundTotal;
         for (uint256 i; i < ids.length; ++i) {
             uint256 id = ids[i];
+            Question storage q = _questions[id];
+            uint256 weight = backing[id][msg.sender];
+            if (q.status != Status.Answered || block.timestamp < roundEnd(q.round) || weight == 0) continue;
             uint256 amount = claimable(id, msg.sender);
-            if (amount == 0) continue;
+            // Refund before deleting backing, so claiming HMM cannot destroy a surplus refund right.
+            refundTotal += _takeSurplus(id, q, msg.sender);
             backing[id][msg.sender] = 0;
+            claimedBacking[id] += uint128(weight);
+            RoundClaims storage progress = roundClaims[q.round];
+            if (claimedBacking[id] == q.raised) progress.shares += q.target;
+            progress.claimed += uint128(amount);
             total += amount;
             emit Claimed(id, msg.sender, amount);
         }
-        if (total != 0) {
-            claimedTotal += total;
-            hmm.safeTransfer(msg.sender, total);
-        }
+        if (total != 0) claimedTotal += total;
+        if (refundTotal != 0) imd.safeTransfer(msg.sender, refundTotal);
+        if (total != 0) hmm.safeTransfer(msg.sender, total);
     }
 
     /// @notice Sends the dev share accrued so far to `dev`. Anyone may call.
@@ -434,6 +505,36 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
     /// @notice The oracle body the mine sends for `spec`: compact JSON, fixed field order. Reverts if `spec` breaks a
     /// rule, so front ends can preview (and check with the swarm) exactly what will be asked.
     function bodyOf(Spec calldata spec) public pure returns (bytes memory) {
+        return _bodyOf(spec, "");
+    }
+
+    /// @notice The exact paid body, including up to 16 unique definitions (64-byte keys, 512-byte values).
+    /// Like the question, definitions use printable ASCII without quotes or backslashes: they cannot inject JSON.
+    function bodyWithDefinitions(Spec calldata spec, Definition[] calldata definitions)
+        public
+        pure
+        returns (bytes memory)
+    {
+        uint256 n = definitions.length;
+        if (n == 0) return bodyOf(spec);
+        if (n > MAX_DEFINITIONS) revert BadDefinitions();
+        bytes memory fields = ',"definitions":{';
+        for (uint256 i; i < n; ++i) {
+            Definition calldata d = definitions[i];
+            if (
+                !_validText(bytes(d.key), MAX_DEFINITION_KEY_BYTES)
+                    || !_validText(bytes(d.value), MAX_DEFINITION_VALUE_BYTES)
+            ) revert BadDefinitions();
+            for (uint256 j; j < i; ++j) {
+                if (keccak256(bytes(d.key)) == keccak256(bytes(definitions[j].key))) revert BadDefinitions();
+            }
+            fields =
+                bytes.concat(fields, i == 0 ? bytes("") : bytes(","), '"', bytes(d.key), '":"', bytes(d.value), '"');
+        }
+        return _bodyOf(spec, bytes.concat(fields, "}"));
+    }
+
+    function _bodyOf(Spec calldata spec, bytes memory definitions) internal pure returns (bytes memory) {
         _checkSpec(spec);
         bytes memory head = abi.encodePacked(
             '{"v":1,"question":"',
@@ -456,6 +557,7 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
             spec.answerType == 3
                 ? abi.encodePacked(',"toleranceBps":', Strings.toString(spec.toleranceBps))
                 : bytes(""),
+            definitions,
             "}"
         );
         return bytes.concat(head, tail);
@@ -475,7 +577,37 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         uint256 amount = backing[id][backer];
         if (amount == 0) return 0;
         Round storage round = rounds[r];
-        return Math.mulDiv(round.reward, amount, round.shares);
+        RoundClaims storage progress = roundClaims[r];
+        // The last claimant receives integer-division dust, including zero-reward claims recorded by claim().
+        if (uint256(claimedBacking[id]) + amount == q.raised && uint256(progress.shares) + q.target == round.shares) {
+            return round.reward - progress.claimed;
+        }
+        // Pay in proportion to actual IMD spent, retaining the original backing split within this question.
+        // Each multiplicand is uint128, so both 256-bit products fit; mulDiv handles the wider numerator.
+        return Math.mulDiv(uint256(round.reward) * q.target, amount, uint256(round.shares) * q.raised);
+    }
+
+    /// @notice Unspent IMD this backer can refund now. The final surplus refund includes rounding dust.
+    function refundable(uint256 id, address backer) public view returns (uint256) {
+        Question storage q = _questions[id];
+        uint256 amount = backing[id][backer];
+        if (q.status == Status.Open) return block.timestamp > q.deadline ? amount : 0;
+        if (q.raised <= q.target || amount == 0 || surplusRefunded[id][backer]) return 0;
+        uint256 surplus = q.raised - q.target;
+        SurplusRefund storage progress = surplusRefunds[id];
+        if (uint256(progress.backing) + amount == q.raised) return surplus - progress.refunded;
+        return Math.mulDiv(surplus, amount, q.raised);
+    }
+
+    function _takeSurplus(uint256 id, Question storage q, address backer) internal returns (uint256 amount) {
+        if (q.raised <= q.target || surplusRefunded[id][backer]) return 0;
+        amount = refundable(id, backer);
+        surplusRefunded[id][backer] = true;
+        SurplusRefund storage progress = surplusRefunds[id];
+        progress.backing += uint128(backing[id][backer]);
+        progress.refunded += uint128(amount);
+        refundableSurplus -= amount;
+        emit SurplusRefunded(id, backer, amount);
     }
 
     /// @notice HMM emitted by the schedule from genesis to `t`, whether or not rounds were answered.
@@ -564,15 +696,19 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         return "uint256";
     }
 
-    function _checkSpec(Spec calldata spec) internal pure {
-        bytes calldata text = bytes(spec.question);
+    function _validText(bytes calldata text, uint256 maximum) internal pure returns (bool) {
         uint256 n = text.length;
-        if (n == 0 || n > MAX_QUESTION_BYTES) revert BadQuestion();
+        if (n == 0 || n > maximum) return false;
         for (uint256 i; i < n; ++i) {
             bytes1 c = text[i];
             // printable ASCII only, and nothing that could end or escape the JSON string
-            if (c < 0x20 || c > 0x7e || c == 0x22 || c == 0x5c) revert BadQuestion();
+            if (c < 0x20 || c > 0x7e || c == 0x22 || c == 0x5c) return false;
         }
+        return true;
+    }
+
+    function _checkSpec(Spec calldata spec) internal pure {
+        if (!_validText(bytes(spec.question), MAX_QUESTION_BYTES)) revert BadQuestion();
         uint256 chainId = spec.chainId;
         if (
             spec.answerType > 3 || spec.evidence > 1
@@ -594,10 +730,12 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         emit Backed(id, msg.sender, amount, raised);
         if (raised == q.target) {
             // The swarm serves only the first Intake request of a transaction. When other backers' IMD is in the
-            // question, the account completing it must call directly (tx.origin), so no earlier request can precede
-            // the mine's in this transaction; someone asking with only their own IMD may use any account.
+            // question, the account completing it must call directly and have no delegated code. EIP-7702 origins
+            // can batch calls too. Someone asking with only their own IMD may still use any account.
             // forge-lint: disable-next-line(tx-origin)
-            if (mine_ != raised && msg.sender != tx.origin) revert CompleterMustBeEOA();
+            if (mine_ != raised && (msg.sender != tx.origin || msg.sender.code.length != 0)) {
+                revert CompleterMustBeEOA();
+            }
             _ask(id, q, body);
         }
     }
@@ -624,11 +762,15 @@ contract HmmMine is IHmmMine, ReentrancyGuardTransient {
         q.adapter = a;
         q.status = Status.Asked;
         openRaised -= price;
+        q.target = uint128(live);
+        refundableSurplus += price - live;
+        if (live != price) emit PriceAdjusted(id, price, live);
+        answerDeadline[id] = block.timestamp + ANSWER_WINDOW;
 
         (bytes4 onResult, bytes4 onFailure) = IOracleAdapter(a).callbackSelectors();
-        imd.forceApprove(address(intake), price);
+        imd.forceApprove(address(intake), live);
         bytes32 requestId =
-            intake.requestWithFailure(act, body, IIntake.Callback(a, onResult), onFailure, address(imd), price);
+            intake.requestWithFailure(act, body, IIntake.Callback(a, onResult), onFailure, address(imd), live);
         q.requestId = requestId;
         questionOf[requestId] = id;
         emit Asked(id, requestId, a);

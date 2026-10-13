@@ -119,7 +119,7 @@ contract AdversarialHandler is Test {
                 mine.back(id, amount, bodyOf[id]);
                 return;
             }
-            ghostPaidToSwarm += q.target;
+            ghostPaidToSwarm += live;
         }
         vm.prank(a, a);
         mine.back(id, amount, bodyOf[id]);
@@ -130,10 +130,21 @@ contract AdversarialHandler is Test {
         uint256 id = ids[idSeed % ids.length];
         address a = actors[actorSeed % actors.length];
         HmmMine.Question memory q = mine.question(id);
-        if (q.status != HmmMine.Status.Open || block.timestamp <= q.deadline) return;
+        if (q.status == HmmMine.Status.Open) {
+            if (block.timestamp <= q.deadline) return;
+        } else if (q.raised <= q.target || mine.surplusRefunded(id, a)) {
+            return;
+        }
         if (mine.backing(id, a) == 0) return;
         vm.prank(a, a);
         mine.refund(id);
+    }
+
+    function expire(uint256 idSeed) external {
+        if (ids.length == 0) return;
+        uint256 id = ids[idSeed % ids.length];
+        if (mine.question(id).status != HmmMine.Status.Asked || block.timestamp <= mine.answerDeadline(id)) return;
+        mine.expire(id);
     }
 
     function movePrice(uint256 seed) external {
@@ -226,7 +237,19 @@ contract AuditAdversarialInvariantTest is HmmTestBase {
     }
 
     function invariant_audit_imdConserved() public view {
-        assertEq(imd.balanceOf(address(mine)), mine.openRaised());
+        assertEq(imd.balanceOf(address(mine)), mine.openRaised() + mine.refundableSurplus());
+        uint256 outstanding;
+        for (uint256 i; i < handler.idsLength(); ++i) {
+            uint256 id = handler.ids(i);
+            HmmMine.Question memory q = mine.question(id);
+            if (q.status == HmmMine.Status.Open) {
+                outstanding += q.raised;
+            } else {
+                (, uint128 refunded) = mine.surplusRefunds(id);
+                outstanding += q.raised - q.target - refunded;
+            }
+        }
+        assertEq(outstanding, imd.balanceOf(address(mine)), "every unspent IMD remains on a backer's ledger");
         uint256 actors;
         for (uint256 i; i < handler.actorsLength(); ++i) {
             actors += imd.balanceOf(handler.actors(i));
@@ -248,6 +271,12 @@ contract AuditAdversarialInvariantTest is HmmTestBase {
             }
             (uint128 shares,) = mine.rounds(q.round);
             assertEq(shares, sum);
+            (, uint128 reward) = mine.rounds(q.round);
+            (uint128 completedShares, uint128 claimed) = mine.roundClaims(q.round);
+            assertLe(completedShares, shares);
+            assertLe(claimed, reward);
+            assertLe(mine.claimedBacking(handler.ids(i)), q.raised);
+            if (completedShares == shares) assertEq(claimed, reward, "fully claimed rounds leave no reward dust");
         }
     }
 }
